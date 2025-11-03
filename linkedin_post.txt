@@ -1,0 +1,69 @@
+🔬 Visualizing Market Structure with Network Filtering
+
+I'm excited to share a new open-source implementation of geometric network filtering methods for financial correlation matrices, based on the groundbreaking research of Tomaso Aste (UCL), Tiziana Di Matteo (King's College London), and Rosario Mantegna (University of Palermo).
+
+🔗 https://github.com/roguetrainer/network-filtering-finance/
+
+👷‍♂️ Work in progress. ⚠️ Testing phase. 📝 Comments welcome.
+
+📊 What does this do?
+
+Financial markets generate massive correlation matrices - for 500 stocks, that's 124,750 correlations, most of which are noise. This code implements three powerful geometric filtering methods to extract the meaningful structure:
+
+• MST (Minimum Spanning Tree): Hierarchical backbone with N-1 edges
+• PMFG (Planar Maximally Filtered Graph): Richer structure with 3(N-2) edges
+• TMFG (Triangulated Maximally Filtered Graph): Fast O(N²) computation
+
+🎬 The Code Creates:
+
+✓ Synthetic time series with realistic evolving correlations
+✓ Rolling correlation estimation with configurable windows
+✓ Animated visualizations showing network evolution over time
+✓ Side-by-side method comparisons
+✓ MP4 exports ready for presentations
+
+💡 Why This Matters:
+
+Traditional approaches like PCA or simple thresholding miss the topological structure that reveals:
+• Sector relationships and hierarchical organization
+• Systemic risk connections
+• Crisis detection through structural changes
+• Portfolio diversification opportunities
+
+The geometric constraints (planarity, triangulation) aren't arbitrary - they balance information retention with interpretability, creating networks that are both statistically meaningful and visually comprehensible.
+
+🎓 Research Foundation:
+
+This implementation is based on 20+ years of research, including:
+• Tumminello et al. (2005) - PMFG - PNAS (500+ citations)
+• Massara et al. (2016) - TMFG - J. Complex Networks
+• Mantegna (1999) - MST for finance - European Physical J.
+
+The methods have been validated against real market data and successfully recover industrial sector classifications, demonstrating they capture genuine economic relationships.
+
+🛠️ Technical Details:
+
+• Complete Python implementation (~1000 lines)
+• Includes synthetic data generator with time-varying correlations
+• Jupyter notebook with interactive examples
+• Automated setup script
+• Full documentation and test suite
+
+Perfect for:
+→ Researchers studying market structure
+→ Quants building risk models
+→ Data scientists learning network theory
+→ Students exploring financial networks
+→ Anyone curious about correlation dynamics
+
+The code is ready to run out of the box with synthetic data, but also works with real market data - just load your returns as a pandas DataFrame.
+
+🙏 Huge acknowledgment to Tomaso Aste and colleagues for developing these elegant methods that bridge topology, geometry, and finance. Their work has fundamentally changed how we understand correlation structure in complex systems.
+
+Would love feedback from the community - what other applications or features would be valuable?
+
+#QuantFinance #NetworkScience #DataScience #MachineLearning #FinancialEngineering #RiskManagement #Python #OpenSource #Research
+
+---
+
+P.S. The animations of networks evolving over time are particularly fascinating to watch - you can literally see correlation structure strengthening during crisis periods and relaxing during stable markets.
