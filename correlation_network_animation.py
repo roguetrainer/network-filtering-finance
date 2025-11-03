@@ -1,0 +1,826 @@
+"""
+Animated Correlation Network Filtering
+=======================================
+
+This script creates animations of filtered correlation networks over time using:
+1. Synthetic time series with time-varying correlations
+2. Rolling window correlation estimation
+3. Network filtering methods (MST, PMFG, TMFG)
+4. Graph layout and animation
+
+Based on the work of Tomaso Aste and colleagues on geometric filtering methods.
+"""
+
+import numpy as np
+import pandas as pd
+import networkx as nx
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib.patches import FancyBboxPatch
+from scipy.spatial.distance import squareform, pdist
+from scipy.linalg import cholesky
+import warnings
+warnings.filterwarnings('ignore')
+
+
+class SyntheticCorrelationGenerator:
+    """
+    Generate synthetic time series with time-varying correlation structure.
+    
+    Uses a diffusion process for correlation matrix parameters that evolves
+    smoothly over time, allowing for realistic changing correlation structures.
+    """
+    
+    def __init__(self, n_assets, seed=42):
+        """
+        Parameters:
+        -----------
+        n_assets : int
+            Number of assets (time series)
+        seed : int
+            Random seed for reproducibility
+        """
+        self.n_assets = n_assets
+        self.rng = np.random.RandomState(seed)
+        
+    def generate_base_correlation_matrix(self, block_structure=True):
+        """
+        Generate a base correlation matrix with optional block structure.
+        
+        Parameters:
+        -----------
+        block_structure : bool
+            If True, create blocks of highly correlated assets (sectors)
+            
+        Returns:
+        --------
+        corr_matrix : np.ndarray
+            Valid correlation matrix (positive semi-definite)
+        """
+        if block_structure:
+            # Create sector-based correlation structure
+            n_sectors = max(3, self.n_assets // 5)
+            sector_assignments = np.random.choice(n_sectors, self.n_assets)
+            
+            # Base correlation matrix
+            corr = np.eye(self.n_assets)
+            
+            for i in range(self.n_assets):
+                for j in range(i+1, self.n_assets):
+                    if sector_assignments[i] == sector_assignments[j]:
+                        # Within sector: higher correlation
+                        corr[i, j] = corr[j, i] = self.rng.uniform(0.4, 0.8)
+                    else:
+                        # Between sectors: lower correlation
+                        corr[i, j] = corr[j, i] = self.rng.uniform(-0.1, 0.3)
+        else:
+            # Random correlation matrix
+            A = self.rng.randn(self.n_assets, self.n_assets)
+            corr = np.dot(A, A.T)
+            
+        # Ensure positive definite
+        corr = self._ensure_positive_definite(corr)
+        
+        # Normalize to correlation matrix
+        D = np.diag(1.0 / np.sqrt(np.diag(corr)))
+        corr = D @ corr @ D
+        
+        return corr
+    
+    def _ensure_positive_definite(self, matrix, epsilon=1e-6):
+        """Make matrix positive definite by adjusting eigenvalues."""
+        eigvals, eigvecs = np.linalg.eigh(matrix)
+        eigvals[eigvals < epsilon] = epsilon
+        return eigvecs @ np.diag(eigvals) @ eigvecs.T
+    
+    def evolve_correlation_parameters(self, base_corr, n_steps, volatility=0.1):
+        """
+        Evolve correlation matrix parameters using a diffusion process.
+        
+        Parameters:
+        -----------
+        base_corr : np.ndarray
+            Starting correlation matrix
+        n_steps : int
+            Number of time steps
+        volatility : float
+            Volatility of the diffusion process (controls rate of change)
+            
+        Returns:
+        --------
+        corr_sequence : list of np.ndarray
+            Sequence of correlation matrices over time
+        """
+        corr_sequence = [base_corr.copy()]
+        current_corr = base_corr.copy()
+        
+        for t in range(1, n_steps):
+            # Ornstein-Uhlenbeck type process for mean reversion
+            mean_reversion = 0.95
+            
+            # Extract off-diagonal correlations
+            n = self.n_assets
+            tril_idx = np.tril_indices(n, k=-1)
+            correlations = current_corr[tril_idx]
+            
+            # Add noise and mean reversion
+            noise = self.rng.randn(len(correlations)) * volatility
+            correlations = mean_reversion * correlations + noise
+            
+            # Clip to valid correlation range
+            correlations = np.clip(correlations, -0.95, 0.95)
+            
+            # Reconstruct symmetric matrix
+            new_corr = np.eye(n)
+            new_corr[tril_idx] = correlations
+            new_corr = new_corr + new_corr.T - np.eye(n)
+            
+            # Ensure positive definite
+            new_corr = self._ensure_positive_definite(new_corr)
+            
+            # Normalize
+            D = np.diag(1.0 / np.sqrt(np.diag(new_corr)))
+            new_corr = D @ new_corr @ D
+            
+            corr_sequence.append(new_corr)
+            current_corr = new_corr
+            
+        return corr_sequence
+    
+    def generate_returns(self, corr_matrix, n_observations, mean_return=0.0, volatility=0.02):
+        """
+        Generate multivariate normal returns with given correlation structure.
+        
+        Parameters:
+        -----------
+        corr_matrix : np.ndarray
+            Correlation matrix
+        n_observations : int
+            Number of return observations
+        mean_return : float
+            Mean return for all assets
+        volatility : float
+            Volatility for all assets
+            
+        Returns:
+        --------
+        returns : np.ndarray
+            Shape (n_observations, n_assets)
+        """
+        mean = np.ones(self.n_assets) * mean_return
+        cov = corr_matrix * (volatility ** 2)
+        
+        returns = self.rng.multivariate_normal(mean, cov, size=n_observations)
+        return returns
+    
+    def generate_time_series(self, total_days=1000, window_size=252, 
+                           volatility_process=0.05, returns_per_day=1):
+        """
+        Generate complete synthetic time series with evolving correlations.
+        
+        Parameters:
+        -----------
+        total_days : int
+            Total number of days to generate
+        window_size : int
+            Size of rolling window for correlation estimation
+        volatility_process : float
+            Volatility of correlation evolution process
+        returns_per_day : int
+            Number of return observations per day
+            
+        Returns:
+        --------
+        returns_df : pd.DataFrame
+            Daily returns with DatetimeIndex
+        true_correlations : list of np.ndarray
+            True correlation matrix for each day
+        """
+        # Generate evolving correlation structure
+        n_correlation_states = total_days
+        base_corr = self.generate_base_correlation_matrix(block_structure=True)
+        correlation_sequence = self.evolve_correlation_parameters(
+            base_corr, n_correlation_states, volatility=volatility_process
+        )
+        
+        # Generate returns for each day
+        all_returns = []
+        dates = pd.date_range(start='2020-01-01', periods=total_days, freq='D')
+        
+        for day_idx, corr_matrix in enumerate(correlation_sequence):
+            day_returns = self.generate_returns(
+                corr_matrix, 
+                n_observations=returns_per_day,
+                volatility=0.02
+            )
+            # Aggregate to daily if multiple observations per day
+            daily_return = day_returns.mean(axis=0)
+            all_returns.append(daily_return)
+        
+        # Create DataFrame
+        returns_df = pd.DataFrame(
+            all_returns,
+            index=dates,
+            columns=[f'Asset_{i:02d}' for i in range(self.n_assets)]
+        )
+        
+        return returns_df, correlation_sequence
+
+
+class CorrelationFilter:
+    """
+    Apply network filtering methods to correlation matrices.
+    """
+    
+    @staticmethod
+    def correlation_to_distance(corr_matrix):
+        """
+        Convert correlation matrix to distance matrix using the metric:
+        d_ij = sqrt(2(1 - C_ij))
+        
+        This satisfies triangle inequality and maps:
+        - Perfect correlation (1) -> distance 0
+        - No correlation (0) -> distance sqrt(2)
+        - Perfect anti-correlation (-1) -> distance 2
+        """
+        distance = np.sqrt(2 * (1 - corr_matrix))
+        np.fill_diagonal(distance, 0)
+        return distance
+    
+    @staticmethod
+    def minimum_spanning_tree(distance_matrix):
+        """
+        Construct Minimum Spanning Tree using Kruskal's algorithm.
+        
+        Returns:
+        --------
+        G : networkx.Graph
+            MST with n-1 edges
+        """
+        n = distance_matrix.shape[0]
+        
+        # Create complete graph
+        G_complete = nx.Graph()
+        for i in range(n):
+            for j in range(i+1, n):
+                G_complete.add_edge(i, j, weight=distance_matrix[i, j])
+        
+        # Compute MST
+        mst = nx.minimum_spanning_tree(G_complete, weight='weight')
+        
+        return mst
+    
+    @staticmethod
+    def planar_maximally_filtered_graph(distance_matrix, max_iterations=None):
+        """
+        Construct PMFG by iteratively adding edges while maintaining planarity.
+        
+        Algorithm from Tumminello et al. (2005) PNAS.
+        
+        Returns:
+        --------
+        G : networkx.Graph
+            PMFG with 3(n-2) edges (planar graph)
+        """
+        n = distance_matrix.shape[0]
+        
+        # Create complete graph
+        G_complete = nx.Graph()
+        for i in range(n):
+            for j in range(i+1, n):
+                G_complete.add_edge(i, j, weight=distance_matrix[i, j])
+        
+        # Sort edges by weight (smallest distance = highest correlation first)
+        edges_sorted = sorted(G_complete.edges(data=True), 
+                            key=lambda x: x[2]['weight'])
+        
+        # Build PMFG
+        G_pmfg = nx.Graph()
+        G_pmfg.add_nodes_from(range(n))
+        max_edges = 3 * (n - 2)
+        
+        if max_iterations is None:
+            max_iterations = len(edges_sorted)
+        
+        iterations = 0
+        for source, dest, data in edges_sorted:
+            if iterations >= max_iterations:
+                break
+            iterations += 1
+            
+            # Try adding edge
+            G_pmfg.add_edge(source, dest, weight=data['weight'])
+            
+            # Check planarity
+            is_planar, _ = nx.check_planarity(G_pmfg)
+            if not is_planar:
+                G_pmfg.remove_edge(source, dest)
+            
+            # Stop when we have enough edges
+            if G_pmfg.number_of_edges() >= max_edges:
+                break
+        
+        return G_pmfg
+    
+    @staticmethod
+    def triangulated_maximally_filtered_graph(distance_matrix):
+        """
+        Construct TMFG using greedy triangle insertion (simplified version).
+        
+        Note: This is a simplified approximation. Full TMFG algorithm from
+        Massara et al. (2016) involves more sophisticated geometric operations.
+        
+        Returns:
+        --------
+        G : networkx.Graph
+            Approximate TMFG with 3(n-2) edges
+        """
+        n = distance_matrix.shape[0]
+        
+        # For small n, use PMFG
+        if n <= 20:
+            return CorrelationFilter.planar_maximally_filtered_graph(distance_matrix)
+        
+        # Start with 4 nodes forming tetrahedron (complete graph K4)
+        G = nx.complete_graph(4)
+        
+        # Add weights to initial edges
+        for i in range(4):
+            for j in range(i+1, 4):
+                G[i][j]['weight'] = distance_matrix[i, j]
+        
+        # Remaining nodes to insert
+        remaining_nodes = list(range(4, n))
+        
+        # Insert nodes one by one
+        while remaining_nodes and G.number_of_edges() < 3 * (n - 2):
+            # Find best node to insert
+            best_node = None
+            best_triangle = None
+            best_score = float('inf')
+            
+            for node in remaining_nodes[:min(5, len(remaining_nodes))]:  # Check first 5 for speed
+                # Find best triangle to insert into
+                for triangle in nx.enumerate_all_cliques(G):
+                    if len(triangle) == 3:
+                        # Score based on sum of distances to triangle vertices
+                        score = sum(distance_matrix[node, v] for v in triangle)
+                        if score < best_score:
+                            best_score = score
+                            best_node = node
+                            best_triangle = triangle
+            
+            if best_node is None:
+                break
+            
+            # Insert node into triangle
+            for v in best_triangle:
+                G.add_edge(best_node, v, weight=distance_matrix[best_node, v])
+            
+            remaining_nodes.remove(best_node)
+        
+        # Add remaining nodes with nearest neighbors if needed
+        for node in remaining_nodes:
+            neighbors = sorted(G.nodes(), 
+                             key=lambda x: distance_matrix[node, x])[:3]
+            for neighbor in neighbors:
+                if G.number_of_edges() < 3 * (n - 2):
+                    G.add_edge(node, neighbor, weight=distance_matrix[node, neighbor])
+        
+        return G
+
+
+class RollingCorrelationEstimator:
+    """
+    Estimate correlation matrices using rolling windows.
+    """
+    
+    def __init__(self, window_size=252):
+        """
+        Parameters:
+        -----------
+        window_size : int
+            Number of observations in rolling window (e.g., 252 for 1 year of daily data)
+        """
+        self.window_size = window_size
+    
+    def estimate_correlations(self, returns_df):
+        """
+        Compute rolling correlation matrices.
+        
+        Parameters:
+        -----------
+        returns_df : pd.DataFrame
+            Returns with DatetimeIndex
+            
+        Returns:
+        --------
+        correlation_estimates : list of dict
+            Each dict contains:
+            - 'date': end date of window
+            - 'correlation': correlation matrix
+            - 'n_obs': number of observations
+        """
+        correlation_estimates = []
+        n_obs = len(returns_df)
+        
+        for end_idx in range(self.window_size, n_obs):
+            start_idx = end_idx - self.window_size
+            window_returns = returns_df.iloc[start_idx:end_idx]
+            
+            corr_matrix = window_returns.corr().values
+            
+            correlation_estimates.append({
+                'date': returns_df.index[end_idx],
+                'correlation': corr_matrix,
+                'n_obs': self.window_size
+            })
+        
+        return correlation_estimates
+
+
+class NetworkAnimator:
+    """
+    Create animations of filtered correlation networks over time.
+    """
+    
+    def __init__(self, figsize=(12, 10)):
+        """
+        Parameters:
+        -----------
+        figsize : tuple
+            Figure size (width, height)
+        """
+        self.figsize = figsize
+        self.node_colors = None
+        self.node_labels = None
+        
+    def create_stable_layout(self, graphs, method='spring'):
+        """
+        Create a stable layout that works across all time steps.
+        
+        Parameters:
+        -----------
+        graphs : list of networkx.Graph
+            Sequence of graphs over time
+        method : str
+            Layout method: 'spring', 'circular', 'kamada_kawai'
+            
+        Returns:
+        --------
+        pos : dict
+            Node positions {node: (x, y)}
+        """
+        # Use first graph to establish layout
+        G_first = graphs[0]
+        
+        if method == 'spring':
+            # Use first graph with many iterations for stability
+            pos = nx.spring_layout(G_first, k=2/np.sqrt(len(G_first.nodes())), 
+                                  iterations=100, seed=42)
+        elif method == 'circular':
+            pos = nx.circular_layout(G_first)
+        elif method == 'kamada_kawai':
+            pos = nx.kamada_kawai_layout(G_first)
+        else:
+            pos = nx.spring_layout(G_first, seed=42)
+        
+        return pos
+    
+    def setup_node_colors(self, n_nodes, n_clusters=None):
+        """
+        Set up node colors for visualization.
+        
+        Parameters:
+        -----------
+        n_nodes : int
+            Number of nodes
+        n_clusters : int, optional
+            Number of clusters/sectors for coloring
+        """
+        if n_clusters is None:
+            n_clusters = max(3, n_nodes // 5)
+        
+        # Assign random clusters
+        cluster_assignments = np.random.choice(n_clusters, n_nodes)
+        
+        # Create color map
+        cmap = plt.cm.Set3
+        self.node_colors = [cmap(cluster / n_clusters) for cluster in cluster_assignments]
+        self.node_labels = {i: f'{i}' for i in range(n_nodes)}
+    
+    def animate_filtered_networks(self, correlation_estimates, filter_method='pmfg',
+                                  output_file='network_animation.mp4', 
+                                  fps=10, interval=100):
+        """
+        Create animation of filtered networks over time.
+        
+        Parameters:
+        -----------
+        correlation_estimates : list of dict
+            Output from RollingCorrelationEstimator
+        filter_method : str
+            'mst', 'pmfg', or 'tmfg'
+        output_file : str
+            Output filename for animation
+        fps : int
+            Frames per second
+        interval : int
+            Milliseconds between frames
+            
+        Returns:
+        --------
+        anim : matplotlib.animation.FuncAnimation
+        """
+        # Create filtered graphs for all time steps
+        print(f"Creating filtered graphs using {filter_method.upper()}...")
+        graphs = []
+        dates = []
+        
+        for i, est in enumerate(correlation_estimates):
+            if i % 20 == 0:
+                print(f"  Processing {i+1}/{len(correlation_estimates)}")
+            
+            corr = est['correlation']
+            dist = CorrelationFilter.correlation_to_distance(corr)
+            
+            if filter_method == 'mst':
+                G = CorrelationFilter.minimum_spanning_tree(dist)
+            elif filter_method == 'pmfg':
+                G = CorrelationFilter.planar_maximally_filtered_graph(dist)
+            elif filter_method == 'tmfg':
+                G = CorrelationFilter.triangulated_maximally_filtered_graph(dist)
+            else:
+                raise ValueError(f"Unknown filter method: {filter_method}")
+            
+            graphs.append(G)
+            dates.append(est['date'])
+        
+        # Create stable layout
+        print("Computing stable layout...")
+        pos = self.create_stable_layout(graphs, method='spring')
+        
+        # Setup node colors
+        n_nodes = len(graphs[0].nodes())
+        self.setup_node_colors(n_nodes)
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=self.figsize)
+        
+        def init():
+            ax.clear()
+            ax.set_xlim(-1.2, 1.2)
+            ax.set_ylim(-1.2, 1.2)
+            ax.axis('off')
+            return []
+        
+        def update(frame):
+            ax.clear()
+            ax.set_xlim(-1.2, 1.2)
+            ax.set_ylim(-1.2, 1.2)
+            ax.axis('off')
+            
+            G = graphs[frame]
+            date = dates[frame]
+            
+            # Draw edges with varying thickness based on weight
+            edges = G.edges(data=True)
+            if len(edges) > 0:
+                weights = [1.0 / (1.0 + e[2].get('weight', 1.0)) for e in edges]
+                max_weight = max(weights) if weights else 1.0
+                edge_widths = [3 * w / max_weight for w in weights]
+                
+                nx.draw_networkx_edges(G, pos, width=edge_widths, 
+                                      alpha=0.4, edge_color='gray', ax=ax)
+            
+            # Draw nodes
+            nx.draw_networkx_nodes(G, pos, node_color=self.node_colors,
+                                  node_size=300, alpha=0.9, ax=ax)
+            
+            # Draw labels
+            nx.draw_networkx_labels(G, pos, self.node_labels, 
+                                   font_size=8, font_weight='bold', ax=ax)
+            
+            # Add title with date and metrics
+            n_edges = G.number_of_edges()
+            avg_degree = 2 * n_edges / n_nodes
+            
+            title = f'{filter_method.upper()} Network\n'
+            title += f'Date: {date.strftime("%Y-%m-%d")}\n'
+            title += f'Edges: {n_edges}, Avg Degree: {avg_degree:.1f}'
+            
+            ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+            
+            # Add frame counter
+            ax.text(0.02, 0.98, f'Frame {frame+1}/{len(graphs)}',
+                   transform=ax.transAxes, fontsize=10,
+                   verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            return []
+        
+        # Create animation
+        print("Creating animation...")
+        anim = animation.FuncAnimation(fig, update, init_func=init,
+                                      frames=len(graphs), interval=interval,
+                                      blit=True, repeat=True)
+        
+        # Save animation
+        print(f"Saving animation to {output_file}...")
+        Writer = animation.writers['ffmpeg']
+        writer = Writer(fps=fps, bitrate=1800)
+        anim.save(output_file, writer=writer)
+        print(f"Animation saved successfully!")
+        
+        plt.close()
+        return anim
+    
+    def create_comparison_animation(self, correlation_estimates,
+                                   output_file='network_comparison.mp4',
+                                   fps=10):
+        """
+        Create side-by-side comparison of MST, PMFG, and TMFG.
+        
+        Parameters:
+        -----------
+        correlation_estimates : list of dict
+            Output from RollingCorrelationEstimator
+        output_file : str
+            Output filename
+        fps : int
+            Frames per second
+        """
+        print("Creating filtered graphs for all methods...")
+        
+        all_graphs = {'MST': [], 'PMFG': [], 'TMFG': []}
+        dates = []
+        
+        for i, est in enumerate(correlation_estimates):
+            if i % 20 == 0:
+                print(f"  Processing {i+1}/{len(correlation_estimates)}")
+            
+            corr = est['correlation']
+            dist = CorrelationFilter.correlation_to_distance(corr)
+            
+            all_graphs['MST'].append(CorrelationFilter.minimum_spanning_tree(dist))
+            all_graphs['PMFG'].append(
+                CorrelationFilter.planar_maximally_filtered_graph(dist)
+            )
+            all_graphs['TMFG'].append(
+                CorrelationFilter.triangulated_maximally_filtered_graph(dist)
+            )
+            dates.append(est['date'])
+        
+        # Create stable layouts for each method
+        print("Computing stable layouts...")
+        layouts = {}
+        for method in ['MST', 'PMFG', 'TMFG']:
+            layouts[method] = self.create_stable_layout(all_graphs[method], method='spring')
+        
+        # Setup node colors
+        n_nodes = len(all_graphs['MST'][0].nodes())
+        self.setup_node_colors(n_nodes)
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        
+        def init():
+            for ax in axes:
+                ax.clear()
+                ax.set_xlim(-1.2, 1.2)
+                ax.set_ylim(-1.2, 1.2)
+                ax.axis('off')
+            return []
+        
+        def update(frame):
+            date = dates[frame]
+            
+            for idx, (method, ax) in enumerate(zip(['MST', 'PMFG', 'TMFG'], axes)):
+                ax.clear()
+                ax.set_xlim(-1.2, 1.2)
+                ax.set_ylim(-1.2, 1.2)
+                ax.axis('off')
+                
+                G = all_graphs[method][frame]
+                pos = layouts[method]
+                
+                # Draw edges
+                edges = G.edges(data=True)
+                if len(edges) > 0:
+                    weights = [1.0 / (1.0 + e[2].get('weight', 1.0)) for e in edges]
+                    max_weight = max(weights) if weights else 1.0
+                    edge_widths = [3 * w / max_weight for w in weights]
+                    
+                    nx.draw_networkx_edges(G, pos, width=edge_widths,
+                                          alpha=0.4, edge_color='gray', ax=ax)
+                
+                # Draw nodes
+                nx.draw_networkx_nodes(G, pos, node_color=self.node_colors,
+                                      node_size=200, alpha=0.9, ax=ax)
+                
+                # Add title
+                n_edges = G.number_of_edges()
+                title = f'{method}\n{n_edges} edges'
+                ax.set_title(title, fontsize=12, fontweight='bold')
+            
+            # Add overall title
+            fig.suptitle(f'Network Comparison - {date.strftime("%Y-%m-%d")}',
+                        fontsize=14, fontweight='bold')
+            
+            return []
+        
+        # Create animation
+        print("Creating comparison animation...")
+        anim = animation.FuncAnimation(fig, update, init_func=init,
+                                      frames=len(dates), interval=100,
+                                      blit=True, repeat=True)
+        
+        # Save
+        print(f"Saving animation to {output_file}...")
+        Writer = animation.writers['ffmpeg']
+        writer = Writer(fps=fps, bitrate=1800)
+        anim.save(output_file, writer=writer)
+        print(f"Animation saved successfully!")
+        
+        plt.close()
+        return anim
+
+
+def main():
+    """
+    Main execution function demonstrating the complete pipeline.
+    """
+    print("="*70)
+    print("Animated Correlation Network Filtering")
+    print("="*70)
+    
+    # Parameters
+    n_assets = 20  # Number of assets
+    total_days = 500  # Total days of data
+    window_size = 100  # Rolling window size
+    
+    print(f"\nParameters:")
+    print(f"  Number of assets: {n_assets}")
+    print(f"  Total days: {total_days}")
+    print(f"  Window size: {window_size}")
+    
+    # Step 1: Generate synthetic data
+    print("\n" + "="*70)
+    print("Step 1: Generating synthetic time series with evolving correlations")
+    print("="*70)
+    
+    generator = SyntheticCorrelationGenerator(n_assets=n_assets, seed=42)
+    returns_df, true_correlations = generator.generate_time_series(
+        total_days=total_days,
+        window_size=window_size,
+        volatility_process=0.05
+    )
+    
+    print(f"\nGenerated returns shape: {returns_df.shape}")
+    print(f"Date range: {returns_df.index[0]} to {returns_df.index[-1]}")
+    
+    # Step 2: Estimate rolling correlations
+    print("\n" + "="*70)
+    print("Step 2: Estimating rolling correlation matrices")
+    print("="*70)
+    
+    estimator = RollingCorrelationEstimator(window_size=window_size)
+    correlation_estimates = estimator.estimate_correlations(returns_df)
+    
+    print(f"\nEstimated {len(correlation_estimates)} correlation matrices")
+    
+    # Step 3: Create animations
+    print("\n" + "="*70)
+    print("Step 3: Creating network animations")
+    print("="*70)
+    
+    animator = NetworkAnimator(figsize=(12, 10))
+    
+    # Create individual animations for each method
+    for method in ['mst', 'pmfg', 'tmfg']:
+        print(f"\n--- Creating {method.upper()} animation ---")
+        animator.animate_filtered_networks(
+            correlation_estimates,
+            filter_method=method,
+            output_file=f'{method}_network_animation.mp4',
+            fps=10,
+            interval=100
+        )
+    
+    # Create comparison animation
+    print("\n--- Creating comparison animation ---")
+    animator.create_comparison_animation(
+        correlation_estimates,
+        output_file='network_comparison.mp4',
+        fps=10
+    )
+    
+    print("\n" + "="*70)
+    print("All animations completed successfully!")
+    print("="*70)
+    
+    return returns_df, correlation_estimates
+
+
+if __name__ == "__main__":
+    returns_df, correlation_estimates = main()
