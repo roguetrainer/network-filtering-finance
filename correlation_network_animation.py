@@ -441,23 +441,28 @@ class RollingCorrelationEstimator:
 
 class NetworkAnimator:
     """
-    Create animations of filtered correlation networks over time.
+    Create animations of filtered correlation networks over time with dynamic layouts.
     """
     
-    def __init__(self, figsize=(12, 10)):
+    def __init__(self, figsize=(12, 10), dynamic_layout=True):
         """
         Parameters:
         -----------
         figsize : tuple
             Figure size (width, height)
+        dynamic_layout : bool
+            If True, nodes move according to force-directed layout based on current edges
+            If False, use static layout (old behavior)
         """
         self.figsize = figsize
+        self.dynamic_layout = dynamic_layout
         self.node_colors = None
         self.node_labels = None
         
     def create_stable_layout(self, graphs, method='spring'):
         """
         Create a stable layout that works across all time steps.
+        (Used only when dynamic_layout=False)
         
         Parameters:
         -----------
@@ -487,6 +492,76 @@ class NetworkAnimator:
         
         return pos
     
+    def compute_dynamic_layouts(self, graphs, smoothing_factor=0.3, 
+                               k_factor=2.0, iterations_per_frame=10):
+        """
+        Compute dynamic force-directed layouts that evolve smoothly over time.
+        
+        Parameters:
+        -----------
+        graphs : list of networkx.Graph
+            Sequence of graphs over time
+        smoothing_factor : float (0 to 1)
+            Higher values = smoother transitions, less responsive to changes
+            0 = fully responsive to current graph structure
+            1 = no movement (fully stable)
+        k_factor : float
+            Optimal distance between nodes (larger = more spread out)
+        iterations_per_frame : int
+            Number of spring layout iterations per frame
+            
+        Returns:
+        --------
+        layouts : list of dict
+            Node positions for each time step
+        """
+        print(f"Computing dynamic layouts with smoothing={smoothing_factor}...")
+        
+        n_nodes = len(graphs[0].nodes())
+        layouts = []
+        
+        # Initialize with spring layout of first graph
+        current_pos = nx.spring_layout(
+            graphs[0], 
+            k=k_factor/np.sqrt(n_nodes),
+            iterations=50,
+            seed=42
+        )
+        layouts.append(current_pos.copy())
+        
+        # Evolve positions frame by frame
+        for frame_idx, G in enumerate(graphs[1:], start=1):
+            if frame_idx % 20 == 0:
+                print(f"  Computing layout {frame_idx}/{len(graphs)}")
+            
+            # Compute new layout based on current graph structure
+            # Using current_pos as starting point for smoother transitions
+            new_pos = nx.spring_layout(
+                G,
+                pos=current_pos,  # Start from previous positions
+                k=k_factor/np.sqrt(n_nodes),
+                iterations=iterations_per_frame,
+                seed=None  # Don't reset
+            )
+            
+            # Smooth transition: blend old and new positions
+            smoothed_pos = {}
+            for node in new_pos:
+                old_x, old_y = current_pos[node]
+                new_x, new_y = new_pos[node]
+                
+                # Weighted average (smoothing)
+                smoothed_x = smoothing_factor * old_x + (1 - smoothing_factor) * new_x
+                smoothed_y = smoothing_factor * old_y + (1 - smoothing_factor) * new_y
+                
+                smoothed_pos[node] = np.array([smoothed_x, smoothed_y])
+            
+            current_pos = smoothed_pos
+            layouts.append(current_pos.copy())
+        
+        print("  Dynamic layouts computed!")
+        return layouts
+    
     def setup_node_colors(self, n_nodes, n_clusters=None):
         """
         Set up node colors for visualization.
@@ -511,7 +586,8 @@ class NetworkAnimator:
     
     def animate_filtered_networks(self, correlation_estimates, filter_method='pmfg',
                                   output_file='network_animation.mp4', 
-                                  fps=10, interval=100):
+                                  fps=10, interval=100,
+                                  smoothing_factor=0.3, k_factor=2.0):
         """
         Create animation of filtered networks over time.
         
@@ -527,6 +603,12 @@ class NetworkAnimator:
             Frames per second
         interval : int
             Milliseconds between frames
+        smoothing_factor : float (0 to 1)
+            Only used if dynamic_layout=True. Controls transition smoothness.
+            Higher = smoother but less responsive. Default 0.3.
+        k_factor : float
+            Only used if dynamic_layout=True. Controls node spacing.
+            Higher = more spread out. Default 2.0.
             
         Returns:
         --------
@@ -556,9 +638,18 @@ class NetworkAnimator:
             graphs.append(G)
             dates.append(est['date'])
         
-        # Create stable layout
-        print("Computing stable layout...")
-        pos = self.create_stable_layout(graphs, method='spring')
+        # Compute layouts (static or dynamic)
+        if self.dynamic_layout:
+            print("Computing dynamic force-directed layouts...")
+            layouts = self.compute_dynamic_layouts(
+                graphs, 
+                smoothing_factor=smoothing_factor,
+                k_factor=k_factor
+            )
+        else:
+            print("Computing static layout...")
+            static_pos = self.create_stable_layout(graphs, method='spring')
+            layouts = [static_pos] * len(graphs)  # Same layout for all frames
         
         # Setup node colors
         n_nodes = len(graphs[0].nodes())
@@ -569,19 +660,20 @@ class NetworkAnimator:
         
         def init():
             ax.clear()
-            ax.set_xlim(-1.2, 1.2)
-            ax.set_ylim(-1.2, 1.2)
+            ax.set_xlim(-1.5, 1.5)
+            ax.set_ylim(-1.5, 1.5)
             ax.axis('off')
             return []
         
         def update(frame):
             ax.clear()
-            ax.set_xlim(-1.2, 1.2)
-            ax.set_ylim(-1.2, 1.2)
+            ax.set_xlim(-1.5, 1.5)
+            ax.set_ylim(-1.5, 1.5)
             ax.axis('off')
             
             G = graphs[frame]
             date = dates[frame]
+            pos = layouts[frame]  # Use dynamic or static layout for this frame
             
             # Draw edges with varying thickness based on weight
             edges = G.edges(data=True)
@@ -637,7 +729,7 @@ class NetworkAnimator:
     
     def create_comparison_animation(self, correlation_estimates,
                                    output_file='network_comparison.mp4',
-                                   fps=10):
+                                   fps=10, smoothing_factor=0.3):
         """
         Create side-by-side comparison of MST, PMFG, and TMFG.
         
@@ -649,6 +741,8 @@ class NetworkAnimator:
             Output filename
         fps : int
             Frames per second
+        smoothing_factor : float (0 to 1)
+            Only used if dynamic_layout=True. Controls transition smoothness.
         """
         print("Creating filtered graphs for all methods...")
         
@@ -671,11 +765,20 @@ class NetworkAnimator:
             )
             dates.append(est['date'])
         
-        # Create stable layouts for each method
-        print("Computing stable layouts...")
-        layouts = {}
+        # Create layouts for each method (dynamic or static)
+        print("Computing layouts for each method...")
+        all_layouts = {}
         for method in ['MST', 'PMFG', 'TMFG']:
-            layouts[method] = self.create_stable_layout(all_graphs[method], method='spring')
+            if self.dynamic_layout:
+                print(f"  Computing dynamic layouts for {method}...")
+                all_layouts[method] = self.compute_dynamic_layouts(
+                    all_graphs[method], 
+                    smoothing_factor=smoothing_factor
+                )
+            else:
+                print(f"  Computing static layout for {method}...")
+                static_pos = self.create_stable_layout(all_graphs[method], method='spring')
+                all_layouts[method] = [static_pos] * len(dates)
         
         # Setup node colors
         n_nodes = len(all_graphs['MST'][0].nodes())
@@ -687,8 +790,8 @@ class NetworkAnimator:
         def init():
             for ax in axes:
                 ax.clear()
-                ax.set_xlim(-1.2, 1.2)
-                ax.set_ylim(-1.2, 1.2)
+                ax.set_xlim(-1.5, 1.5)
+                ax.set_ylim(-1.5, 1.5)
                 ax.axis('off')
             return []
         
@@ -697,12 +800,12 @@ class NetworkAnimator:
             
             for idx, (method, ax) in enumerate(zip(['MST', 'PMFG', 'TMFG'], axes)):
                 ax.clear()
-                ax.set_xlim(-1.2, 1.2)
-                ax.set_ylim(-1.2, 1.2)
+                ax.set_xlim(-1.5, 1.5)
+                ax.set_ylim(-1.5, 1.5)
                 ax.axis('off')
                 
                 G = all_graphs[method][frame]
-                pos = layouts[method]
+                pos = all_layouts[method][frame]  # Use dynamic layout for this frame
                 
                 # Draw edges
                 edges = G.edges(data=True)
@@ -724,7 +827,8 @@ class NetworkAnimator:
                 ax.set_title(title, fontsize=12, fontweight='bold')
             
             # Add overall title
-            fig.suptitle(f'Network Comparison - {date.strftime("%Y-%m-%d")}',
+            layout_type = "Dynamic" if self.dynamic_layout else "Static"
+            fig.suptitle(f'Network Comparison ({layout_type} Layout) - {date.strftime("%Y-%m-%d")}',
                         fontsize=14, fontweight='bold')
             
             return []
@@ -794,29 +898,60 @@ def main():
     print("Step 3: Creating network animations")
     print("="*70)
     
-    animator = NetworkAnimator(figsize=(12, 10))
+    # Create animations with DYNAMIC layouts (nodes move with force-directed layout)
+    print("\n*** Creating DYNAMIC layout animations ***")
+    print("(Nodes will move according to evolving correlation structure)\n")
+    
+    animator_dynamic = NetworkAnimator(figsize=(12, 10), dynamic_layout=True)
     
     # Create individual animations for each method
     for method in ['mst', 'pmfg', 'tmfg']:
-        print(f"\n--- Creating {method.upper()} animation ---")
-        animator.animate_filtered_networks(
+        print(f"\n--- Creating {method.upper()} animation (DYNAMIC) ---")
+        animator_dynamic.animate_filtered_networks(
             correlation_estimates,
             filter_method=method,
-            output_file=f'{method}_network_animation.mp4',
+            output_file=f'{method}_network_animation_dynamic.mp4',
             fps=10,
-            interval=100
+            interval=100,
+            smoothing_factor=0.3,  # Controls smoothness (0=very responsive, 1=static)
+            k_factor=2.0  # Controls node spacing
         )
     
-    # Create comparison animation
-    print("\n--- Creating comparison animation ---")
-    animator.create_comparison_animation(
+    # Create comparison animation with dynamic layout
+    print("\n--- Creating comparison animation (DYNAMIC) ---")
+    animator_dynamic.create_comparison_animation(
         correlation_estimates,
-        output_file='network_comparison.mp4',
+        output_file='network_comparison_dynamic.mp4',
+        fps=10,
+        smoothing_factor=0.3
+    )
+    
+    # Optional: Also create STATIC layout versions for comparison
+    print("\n\n*** Creating STATIC layout animations for comparison ***")
+    print("(Nodes stay in fixed positions)\n")
+    
+    animator_static = NetworkAnimator(figsize=(12, 10), dynamic_layout=False)
+    
+    # Just create comparison for static version
+    print("\n--- Creating comparison animation (STATIC) ---")
+    animator_static.create_comparison_animation(
+        correlation_estimates,
+        output_file='network_comparison_static.mp4',
         fps=10
     )
     
     print("\n" + "="*70)
     print("All animations completed successfully!")
+    print("="*70)
+    print("\nOutput files:")
+    print("  Dynamic layouts:")
+    print("    - mst_network_animation_dynamic.mp4")
+    print("    - pmfg_network_animation_dynamic.mp4")
+    print("    - tmfg_network_animation_dynamic.mp4")
+    print("    - network_comparison_dynamic.mp4")
+    print("  Static layout:")
+    print("    - network_comparison_static.mp4")
+    print("\nNote: Dynamic layouts show how node positions evolve with correlations!")
     print("="*70)
     
     return returns_df, correlation_estimates

@@ -4,6 +4,7 @@ A Python implementation for creating animations of filtered correlation networks
 
 ![Network Filter Graph](./Filtered%20Graph.png)
 
+
 ## Overview
 
 This code provides a complete pipeline for:
@@ -41,11 +42,14 @@ This code provides a complete pipeline for:
    - Based on Massara et al. (2016)
 
 ### Animation Features
-- Stable graph layouts across time
+- **Dynamic Force-Directed Layout (NEW!)**: Nodes move according to evolving correlation structure
+- **Static Layout**: Traditional fixed-position layout for node tracking
+- Stable graph layouts across time with adjustable smoothing
 - Edge thickness based on correlation strength
 - Color-coded nodes by sector/cluster
 - Multiple visualization modes (individual methods or side-by-side comparison)
 - Exportable as MP4 videos
+- Configurable smoothing and spacing parameters
 
 ## Installation
 
@@ -87,13 +91,15 @@ returns_df, true_correlations = generator.generate_time_series(
 estimator = RollingCorrelationEstimator(window_size=100)
 correlation_estimates = estimator.estimate_correlations(returns_df)
 
-# 3. Create animation
-animator = NetworkAnimator(figsize=(12, 10))
+# 3. Create animation with DYNAMIC layout (NEW!)
+# Nodes move according to force-directed layout
+animator = NetworkAnimator(figsize=(12, 10), dynamic_layout=True)
 animator.animate_filtered_networks(
     correlation_estimates,
     filter_method='pmfg',
     output_file='pmfg_animation.mp4',
-    fps=10
+    fps=10,
+    smoothing_factor=0.3  # Control movement smoothness
 )
 ```
 
@@ -103,11 +109,9 @@ Or simply run the main script:
 python correlation_network_animation.py
 ```
 
-This will generate four animation files:
-- `mst_network_animation.mp4` - MST method only
-- `pmfg_network_animation.mp4` - PMFG method only
-- `tmfg_network_animation.mp4` - TMFG method only
-- `network_comparison.mp4` - Side-by-side comparison of all three methods
+This will generate animations with both dynamic and static layouts:
+- Dynamic layout files: `*_dynamic.mp4` (nodes move with network structure)
+- Static layout file: `*_static.mp4` (nodes stay in fixed positions)
 
 ## Detailed Usage
 
