@@ -16,6 +16,7 @@ import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch
 from scipy.spatial.distance import squareform, pdist
 from scipy.linalg import cholesky
@@ -444,7 +445,7 @@ class NetworkAnimator:
     Create animations of filtered correlation networks over time with dynamic layouts.
     """
     
-    def __init__(self, figsize=(12, 10), dynamic_layout=True):
+    def __init__(self, figsize=(12, 10), dynamic_layout=True, shade_triangles=False):
         """
         Parameters:
         -----------
@@ -453,9 +454,12 @@ class NetworkAnimator:
         dynamic_layout : bool
             If True, nodes move according to force-directed layout based on current edges
             If False, use static layout (old behavior)
+        shade_triangles : bool
+            If True, shade triangular faces (3-cliques) based on correlation strength
         """
         self.figsize = figsize
         self.dynamic_layout = dynamic_layout
+        self.shade_triangles = shade_triangles
         self.node_colors = None
         self.node_labels = None
         
@@ -584,10 +588,75 @@ class NetworkAnimator:
         self.node_colors = [cmap(cluster / n_clusters) for cluster in cluster_assignments]
         self.node_labels = {i: f'{i}' for i in range(n_nodes)}
     
+    def draw_shaded_triangles(self, G, pos, ax, correlation_matrix=None, alpha=0.3, cmap='RdYlBu_r'):
+        """
+        Draw shaded triangular faces (3-cliques) on the network.
+        
+        Parameters:
+        -----------
+        G : networkx.Graph
+            Network with edges
+        pos : dict
+            Node positions {node: (x, y)}
+        ax : matplotlib axis
+            Axis to draw on
+        correlation_matrix : np.ndarray, optional
+            Correlation matrix to compute face colors. If None, use edge weights.
+        alpha : float
+            Transparency of triangular faces (0 to 1)
+        cmap : str
+            Colormap name for coloring triangles by correlation strength
+        """
+        # Find all triangles (3-cliques)
+        triangles = [clique for clique in nx.enumerate_all_cliques(G) if len(clique) == 3]
+        
+        if len(triangles) == 0:
+            return  # No triangles to draw
+        
+        # Shade each triangle
+        for triangle in triangles:
+            # Get positions of triangle vertices
+            vertices = np.array([pos[node] for node in triangle])
+            
+            # Calculate average correlation for this triangle
+            if correlation_matrix is not None:
+                # Use provided correlation matrix
+                corr_vals = [correlation_matrix[triangle[i], triangle[j]]
+                            for i in range(3) for j in range(i+1, 3)]
+                avg_correlation = np.mean(corr_vals)
+            else:
+                # Calculate from edge weights in graph
+                edges = [(triangle[i], triangle[j]) for i in range(3) for j in range(i+1, 3)]
+                weights = [G[u][v]['weight'] for u, v in edges if G.has_edge(u, v)]
+                
+                if weights:
+                    avg_weight = np.mean(weights)
+                    # Convert distance back to correlation: rho = 1 - d²/2
+                    avg_correlation = 1 - (avg_weight ** 2) / 2
+                else:
+                    avg_correlation = 0.0
+            
+            # Map correlation to color
+            # Normalize correlation from [-1, 1] to [0, 1] for colormap
+            color_val = (avg_correlation + 1) / 2
+            color = plt.cm.get_cmap(cmap)(color_val)
+            
+            # Create polygon patch for the triangle
+            polygon = mpatches.Polygon(
+                vertices, 
+                closed=True,
+                facecolor=color,
+                edgecolor='none',
+                alpha=alpha,
+                zorder=1  # Draw triangles behind edges and nodes
+            )
+            ax.add_patch(polygon)
+    
     def animate_filtered_networks(self, correlation_estimates, filter_method='pmfg',
                                   output_file='network_animation.mp4', 
                                   fps=10, interval=100,
-                                  smoothing_factor=0.3, k_factor=2.0):
+                                  smoothing_factor=0.3, k_factor=2.0,
+                                  triangle_alpha=0.3, triangle_cmap='RdYlBu_r'):
         """
         Create animation of filtered networks over time.
         
@@ -609,6 +678,10 @@ class NetworkAnimator:
         k_factor : float
             Only used if dynamic_layout=True. Controls node spacing.
             Higher = more spread out. Default 2.0.
+        triangle_alpha : float
+            Transparency of triangular faces (0 to 1). Only used if shade_triangles=True.
+        triangle_cmap : str
+            Colormap for triangle shading. Only used if shade_triangles=True.
             
         Returns:
         --------
@@ -618,12 +691,14 @@ class NetworkAnimator:
         print(f"Creating filtered graphs using {filter_method.upper()}...")
         graphs = []
         dates = []
+        correlation_matrices = []  # Store for triangle shading
         
         for i, est in enumerate(correlation_estimates):
             if i % 20 == 0:
                 print(f"  Processing {i+1}/{len(correlation_estimates)}")
             
             corr = est['correlation']
+            correlation_matrices.append(corr)  # Store correlation matrix
             dist = CorrelationFilter.correlation_to_distance(corr)
             
             if filter_method == 'mst':
@@ -674,6 +749,13 @@ class NetworkAnimator:
             G = graphs[frame]
             date = dates[frame]
             pos = layouts[frame]  # Use dynamic or static layout for this frame
+            corr_matrix = correlation_matrices[frame]  # Get correlation matrix
+            
+            # Draw shaded triangles if enabled (drawn first, behind everything)
+            if self.shade_triangles:
+                self.draw_shaded_triangles(G, pos, ax, corr_matrix, 
+                                          alpha=triangle_alpha, 
+                                          cmap=triangle_cmap)
             
             # Draw edges with varying thickness based on weight
             edges = G.edges(data=True)
@@ -697,7 +779,13 @@ class NetworkAnimator:
             n_edges = G.number_of_edges()
             avg_degree = 2 * n_edges / n_nodes
             
-            title = f'{filter_method.upper()} Network\n'
+            # Count triangles if shading is enabled
+            if self.shade_triangles:
+                n_triangles = sum(1 for c in nx.enumerate_all_cliques(G) if len(c) == 3)
+                title = f'{filter_method.upper()} Network (Triangles: {n_triangles})\n'
+            else:
+                title = f'{filter_method.upper()} Network\n'
+            
             title += f'Date: {date.strftime("%Y-%m-%d")}\n'
             title += f'Edges: {n_edges}, Avg Degree: {avg_degree:.1f}'
             
@@ -848,6 +936,117 @@ class NetworkAnimator:
         
         plt.close()
         return anim
+    
+    def visualize_network_with_triangles(self, correlation_matrix, filter_method='pmfg',
+                                        output_file='network_triangles.png',
+                                        title=None, figsize=None,
+                                        triangle_alpha=0.35, triangle_cmap='RdYlBu_r'):
+        """
+        Create a static visualization of a network with shaded triangular faces.
+        
+        Parameters:
+        -----------
+        correlation_matrix : np.ndarray
+            Correlation matrix
+        filter_method : str
+            'mst', 'pmfg', or 'tmfg'
+        output_file : str
+            Output filename for the image
+        title : str, optional
+            Custom title for the plot
+        figsize : tuple, optional
+            Figure size (width, height). Uses self.figsize if None.
+        triangle_alpha : float
+            Transparency of triangular faces (0 to 1)
+        triangle_cmap : str
+            Colormap for triangle shading
+            
+        Returns:
+        --------
+        fig, ax : matplotlib figure and axis
+        """
+        # Create filtered graph
+        print(f"Creating {filter_method.upper()} network...")
+        dist = CorrelationFilter.correlation_to_distance(correlation_matrix)
+        
+        if filter_method == 'mst':
+            G = CorrelationFilter.minimum_spanning_tree(dist)
+        elif filter_method == 'pmfg':
+            G = CorrelationFilter.planar_maximally_filtered_graph(dist)
+        elif filter_method == 'tmfg':
+            G = CorrelationFilter.triangulated_maximally_filtered_graph(dist)
+        else:
+            raise ValueError(f"Unknown filter method: {filter_method}")
+        
+        # Create layout
+        print("Computing layout...")
+        n_nodes = len(G.nodes())
+        pos = nx.spring_layout(G, k=2/np.sqrt(n_nodes), iterations=200, seed=42)
+        
+        # Setup colors
+        self.setup_node_colors(n_nodes)
+        
+        # Create figure
+        fig_size = figsize if figsize else self.figsize
+        fig, ax = plt.subplots(figsize=fig_size)
+        
+        ax.set_xlim(-1.5, 1.5)
+        ax.set_ylim(-1.5, 1.5)
+        ax.axis('off')
+        
+        # Draw shaded triangles
+        print("Drawing triangular faces...")
+        self.draw_shaded_triangles(G, pos, ax, correlation_matrix, 
+                                   alpha=triangle_alpha, cmap=triangle_cmap)
+        
+        # Draw edges
+        edges = G.edges(data=True)
+        if len(edges) > 0:
+            weights = [1.0 / (1.0 + e[2].get('weight', 1.0)) for e in edges]
+            max_weight = max(weights) if weights else 1.0
+            edge_widths = [3 * w / max_weight for w in weights]
+            
+            nx.draw_networkx_edges(G, pos, width=edge_widths, 
+                                  alpha=0.5, edge_color='gray', ax=ax, zorder=2)
+        
+        # Draw nodes
+        nx.draw_networkx_nodes(G, pos, node_color=self.node_colors,
+                              node_size=400, alpha=0.9, 
+                              edgecolors='black', linewidths=2,
+                              ax=ax, zorder=3)
+        
+        # Draw labels
+        nx.draw_networkx_labels(G, pos, self.node_labels, 
+                               font_size=9, font_weight='bold', ax=ax, zorder=4)
+        
+        # Count triangles
+        triangles = [c for c in nx.enumerate_all_cliques(G) if len(c) == 3]
+        n_triangles = len(triangles)
+        n_edges = G.number_of_edges()
+        avg_degree = 2 * n_edges / n_nodes
+        
+        # Add title
+        if title is None:
+            title = f'{filter_method.upper()} Network with Shaded Triangular Faces\n'
+            title += f'Nodes: {n_nodes} | Edges: {n_edges} | Triangles: {n_triangles} | '
+            title += f'Avg Degree: {avg_degree:.1f}'
+        
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        
+        # Add colorbar
+        sm = plt.cm.ScalarMappable(cmap=triangle_cmap, 
+                                   norm=plt.Normalize(vmin=-1, vmax=1))
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label('Triangle Avg Correlation', rotation=270, labelpad=20, fontsize=11)
+        
+        # Save
+        print(f"Saving visualization to {output_file}...")
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"Visualization saved!")
+        
+        return fig, ax
 
 
 def main():
@@ -940,6 +1139,52 @@ def main():
         fps=10
     )
     
+    # Step 4: Create visualizations with shaded triangles
+    print("\n" + "="*70)
+    print("Step 4: Creating static visualizations with shaded triangular faces")
+    print("="*70)
+    
+    # Create visualizations with triangle shading for each method
+    print("\n*** Creating static images with triangle shading ***\n")
+    
+    animator_triangles = NetworkAnimator(figsize=(14, 12), shade_triangles=True)
+    
+    # Use the last correlation matrix for static visualization
+    last_corr = correlation_estimates[-1]['correlation']
+    
+    for method in ['pmfg', 'tmfg']:  # MST has no triangles, only trees
+        print(f"\n--- Creating {method.upper()} visualization with triangles ---")
+        animator_triangles.visualize_network_with_triangles(
+            last_corr,
+            filter_method=method,
+            output_file=f'{method}_triangles.png',
+            triangle_alpha=0.35,
+            triangle_cmap='RdYlBu_r'  # Red=high correlation, Blue=low
+        )
+    
+    # Step 5: Create animations WITH triangle shading
+    print("\n" + "="*70)
+    print("Step 5: Creating animated networks with shaded triangular faces")
+    print("="*70)
+    
+    print("\n*** Creating animations with triangle shading (PMFG only) ***")
+    print("(This may take longer due to triangle rendering)\n")
+    
+    animator_shaded = NetworkAnimator(figsize=(14, 12), dynamic_layout=True, 
+                                     shade_triangles=True)
+    
+    print("\n--- Creating PMFG animation with shaded triangles ---")
+    animator_shaded.animate_filtered_networks(
+        correlation_estimates,
+        filter_method='pmfg',
+        output_file='pmfg_network_triangles_animation.mp4',
+        fps=10,
+        interval=100,
+        smoothing_factor=0.3,
+        triangle_alpha=0.35,
+        triangle_cmap='RdYlBu_r'
+    )
+    
     print("\n" + "="*70)
     print("All animations completed successfully!")
     print("="*70)
@@ -951,7 +1196,13 @@ def main():
     print("    - network_comparison_dynamic.mp4")
     print("  Static layout:")
     print("    - network_comparison_static.mp4")
+    print("  Static images with triangle shading:")
+    print("    - pmfg_triangles.png")
+    print("    - tmfg_triangles.png")
+    print("  Animated with triangle shading:")
+    print("    - pmfg_network_triangles_animation.mp4")
     print("\nNote: Dynamic layouts show how node positions evolve with correlations!")
+    print("Triangle colors: Red=high correlation, Blue=low correlation")
     print("="*70)
     
     return returns_df, correlation_estimates

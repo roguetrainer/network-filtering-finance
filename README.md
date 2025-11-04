@@ -42,6 +42,7 @@ This code provides a complete pipeline for:
 
 ### Animation Features
 - **Dynamic Force-Directed Layout (NEW!)**: Nodes move according to evolving correlation structure
+- **Triangle Shading (NEW!)**: Color triangular faces (3-cliques) by correlation strength
 - **Static Layout**: Traditional fixed-position layout for node tracking
 - Stable graph layouts across time with adjustable smoothing
 - Edge thickness based on correlation strength
@@ -111,6 +112,40 @@ python correlation_network_animation.py
 This will generate animations with both dynamic and static layouts:
 - Dynamic layout files: `*_dynamic.mp4` (nodes move with network structure)
 - Static layout file: `*_static.mp4` (nodes stay in fixed positions)
+
+### Triangle Shading (NEW!)
+
+Color triangular faces (3-cliques) to reveal correlation structure:
+
+```python
+# Create animation WITH triangle shading
+animator = NetworkAnimator(
+    dynamic_layout=True,
+    shade_triangles=True  # Enable triangle coloring
+)
+
+animator.animate_filtered_networks(
+    correlation_estimates,
+    filter_method='pmfg',
+    output_file='pmfg_triangles.mp4',
+    triangle_alpha=0.35,      # Transparency
+    triangle_cmap='RdYlBu_r'  # Red=high corr, Blue=low
+)
+
+# Or create a static visualization
+animator.visualize_network_with_triangles(
+    correlation_matrix,
+    filter_method='pmfg',
+    output_file='network_triangles.png'
+)
+```
+
+**What triangle shading reveals:**
+- Red triangles → High local correlation clusters
+- Blue triangles → Low correlation (diversification opportunities)
+- Color changes over time → Evolving correlation structure
+
+See [Triangle Shading Documentation](docs/TRIANGLE_SHADING.md) for details.
 
 ## Detailed Usage
 
