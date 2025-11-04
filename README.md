@@ -2,6 +2,8 @@
 
 A Python implementation for creating animations of filtered correlation networks over time, based on the geometric filtering methods developed by Tomaso Aste and colleagues.
 
+![img](./img/Filtered%20Graph.png)
+
 ## Overview
 
 This code provides a complete pipeline for:
